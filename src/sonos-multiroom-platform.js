@@ -104,6 +104,7 @@ function SonosMultiroomPlatform(log, config, api) {
                     device.serialNumber = deviceDescription.serialNum;
                     device.softwareVersion = deviceDescription.softwareVersion;
                     device.hardwareVersion = deviceDescription.hardwareVersion;
+                    device.UUID = deviceDescription.UDN.replace('uuid:','');
 
                     // Gets the possible inputs
                     for (let j = 0; j < deviceDescription.serviceList.service.length; j++) {
@@ -184,6 +185,76 @@ SonosMultiroomPlatform.prototype.getGroupPlayState = function (device) {
         return coordinatorDevice.sonos.getCurrentState().then(function(playState) {
             return playState;
         });
+    });
+}
+
+/**
+ * Get Sonos volume and coordinator for all of the groups
+ * @param zone: the zone that triggered the event 
+ */
+SonosMultiroomPlatform.prototype.getGroupVolume = function (zone) {
+    const { Characteristic } = zone.platform;
+
+    zone.masterDevice.sonos.getAllGroups().then(function(groups) {
+        groups = groups.filter(function(g) { return zone.platform.zones.find(function(z) { return z.masterDevice.UUID === g.Coordinator; }); });
+        
+        groups.forEach(function(group) {
+            group.ZoneGroupMember.forEach(function(m) {
+                const memberZone = zone.platform.zones.find(function(z) { return z.name === m.ZoneName; });
+
+                // check for brightness/volume characteristic
+                if (memberZone.sonosService.getCharacteristic(Characteristic.Brightness)) {
+                    memberZone.masterDevice.sonos.getVolume().then(function(volume) {
+                        memberZone.sonosService.updateCharacteristic(Characteristic.Brightness,volume);
+
+                        // annotate the group coordinator
+                        if (memberZone.masterDevice.UUID === group.Coordinator && group.ZoneGroupMember.length > 1) {
+                            memberZone.sonosService.updateCharacteristic(Characteristic.StatusLowBattery, 1);
+                        } else {
+                            memberZone.sonosService.updateCharacteristic(Characteristic.StatusLowBattery, 0);
+                        }
+                    });
+                }
+            });
+        });
+    });
+}
+
+/**
+ * Set Sonos volume
+ * @param zone: the zone that triggered the event 
+ */
+SonosMultiroomPlatform.prototype.setGroupVolume = function (zone) {
+    const { Characteristic } = zone.platform;
+
+    zone.masterDevice.sonos.getAllGroups().then(function(groups) {
+        const group  = groups.find(function(g) { return zone.platform.zones.find(function(z) { return z.masterDevice.UUID === g.Coordinator; }); });
+        const volume = zone.sonosService.getCharacteristic(Characteristic.Brightness).value;
+
+        // Coordinator Sonos device has relative volume control over the entire group
+        if (group.ZoneGroupMember.length > 1 && zone.masterDevice.UUID === group.Coordinator) {
+            zone.masterDevice.sonos.getVolume().then(function(sonosVolume) {
+                const volumeDiff = volume - sonosVolume;
+
+                if (volumeDiff != 0) {
+                    group.ZoneGroupMember.forEach(function(m) {
+                        const memberZone = zone.platform.zones.find(function(z) { return z.name === m.ZoneName; });
+
+                        memberZone.masterDevice.sonos.getVolume().then(function(value) {
+                            const zoneVolume = Math.max(Math.min(value + volumeDiff, memberZone.maxVolume), memberZone.minVolume);
+                            memberZone.masterDevice.sonos.setVolume(zoneVolume).then(function() {
+                                memberZone.platform.log(memberZone.name + ' - Volume set to: ' + zoneVolume.toString());
+                            });
+                        });
+                    });
+                }
+            });
+        } else {
+            // All other devices are direct volume control
+            zone.masterDevice.sonos.setVolume(volume).then(function() {
+                zone.platform.log(zone.name + ' - Volume set to: ' + volume.toString());
+            });
+        }
     });
 }
 
