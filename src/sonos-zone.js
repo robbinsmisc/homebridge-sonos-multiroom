@@ -27,7 +27,7 @@ function SonosZone(platform, zoneMasterDevice, config) {
     // Gets the lightbulb and outlet accessory
     let outletAccessory = null;
     let lightbulbAccessory = null;
-    if (config.isVolumeControlled) {
+    if (config.volumeControlled) {
         lightbulbAccessory = unusedDeviceAccessories.find(function(a) { return a.context.kind === 'LightbulbAccessory'; });
         if (lightbulbAccessory) {
             unusedDeviceAccessories.splice(unusedDeviceAccessories.indexOf(lightbulbAccessory), 1);
@@ -187,7 +187,6 @@ function SonosZone(platform, zoneMasterDevice, config) {
     // Subscribes for changes of the transport control
     zone.masterDevice.sonos.on('AVTransport', function () {
         zone.updatePlayState();
-        zone.platform.getGroupVolume(zone);
     });
 
     // Subscribes for changes in the rendering control
@@ -212,7 +211,6 @@ function SonosZone(platform, zoneMasterDevice, config) {
     // Subscribes for changes of the group rendering
     zone.masterDevice.sonos.on('RenderingControl', function () {
         zone.updatePlayState();
-        zone.platform.getGroupVolume(zone);
     });
 
     // Subscribes for changes of the volume control and update the group
@@ -230,11 +228,16 @@ SonosZone.prototype.updatePlayState = function () {
 
     // Updates the play state based on the group play state
     zone.platform.getGroupPlayState(zone.masterDevice).then(function(playState) {
-        zone.platform.log(zone.name + ' - Updated play state: ' + (playState === 'playing' ? 'ON' : 'OFF'));
-        zone.sonosService.updateCharacteristic(Characteristic.On, playState === 'playing');
+        zone.platform.log(zone.name + ' - Updated play state: ' + playState);
+
+        if (playState !== 'transitioning') {
+            zone.sonosService.updateCharacteristic(Characteristic.On, playState === 'playing');
+        }
     }, function() {
         zone.platform.log(zone.name + ' - Error while updating group play state.');
     });
+
+    zone.platform.getGroupVolume(zone);
 }
 
 /**
@@ -246,7 +249,7 @@ SonosZone.prototype.setVolume = function (volume) {
     const { Characteristic } = zone.platform;
 
     // guard against a minimum volume (brightness of 0)
-    const cmdVolume = Math.min(Math.min(volume, zone.maxVolume), zone.minVolume);
+    const cmdVolume = Math.max(Math.min(volume, zone.maxVolume), zone.minVolume);
 
     if (cmdVolume != volume) {
         zone.sonosService.updateCharacteristic(Characteristic.Brightness,cmdVolume);
@@ -291,10 +294,27 @@ SonosZone.prototype.bindOn = function (value) {
                     }
 
                     // Joins the group
-                    zone.platform.log(zone.name + ' - Set outlet state: ON - joining');
-                    zone.masterDevice.sonos.joinGroup(priorityZone.name).then(function () {}, function () {
-                        zone.platform.log(zone.name + ' - Error while joining group ' + priorityZone.name + '.');
-                    });
+                    zone.platform.log(zone.name + ' - Set outlet state: ON - joining ' + priorityZone.name);
+
+                    if (zone.config.defaultGroupVolume && priorityZone.config.defaultGroupVolume) {
+                        // relative volume gain scheduling
+                        priorityZone.masterDevice.sonos.getVolume().then(function(coordinatorVolume) {
+                            const memberVolume = coordinatorVolume - priorityZone.config.defaultGroupVolume + zone.config.defaultGroupVolume;
+
+                            zone.masterDevice.sonos.joinGroup(priorityZone.name).then(function () {
+                                zone.masterDevice.sonos.setVolume(memberVolume).then(function(){
+                                    zone.sonosService.updateCharacteristic(Characteristic.Brightness,memberVolume);
+                                });
+                            }, function () {
+                                zone.platform.log(zone.name + ' - Error while joining group ' + priorityZone.name + '.');
+                            });
+                        });
+                    } else {
+                        // no defined group volume
+                        zone.masterDevice.sonos.joinGroup(priorityZone.name).then(function () {}, function () {
+                            zone.platform.log(zone.name + ' - Error while joining group ' + priorityZone.name + '.');
+                        });
+                    }
                     return;
                 }
 
@@ -327,6 +347,19 @@ SonosZone.prototype.bindOn = function (value) {
     } else { // off
         zone.platform.log(zone.name + ' - Set outlet state: OFF');
 
+        // check if master and group turn off
+        if (config.groupOverride) {
+            zone.masterDevice.sonos.getAllGroups().then(function(groups) {
+                const group =  groups.find(function(g) { return g.Coordinator === zone.masterDevice.UUID; });
+                zoneMembers = group.ZoneGroupMember.filter(function(z) { return z.UUID !== zone.masterDevice.UUID; });
+
+                zoneMembers.forEach(function(zm) {
+                    const attachedZone = zone.platform.zones.find(function(z) { return z.masterDevice.UUID === zm.UUID});
+                    attachedZone.masterDevice.sonos.leaveGroup();
+                });
+            });
+        }
+
         // set minimum volume; i.e., brightness = 0% turns off lightbulb, which will turn on at 100%
         if (zone.sonosService.getCharacteristic(Characteristic.Brightness)) {
             const offVolume = Math.max(zone.minVolume, zone.sonosService.getCharacteristic(Characteristic.Brightness).value);
@@ -334,7 +367,7 @@ SonosZone.prototype.bindOn = function (value) {
         }
 
         // Checks if the zone is playing back its own TV stream, in this case, nothing should be done
-        if (zone.masterDevice.htControl) {
+        if (zone.masterDevice.htControl && !config.tvOverride) {
             zone.platform.log(zone.name + ' - Set outlet state: OFF - TV, checking current track');
             zone.masterDevice.sonos.currentTrack().then(function(currentTrack) {
                 if (currentTrack && currentTrack.uri && currentTrack.uri.endsWith(':spdif')) {
@@ -351,7 +384,7 @@ SonosZone.prototype.bindOn = function (value) {
             });
         } else {
             zone.platform.log(zone.name + ' - Set outlet state: OFF - Not TV, leaving group');
-            zone.masterDevice.sonos.leaveGroup().then(function () {}, function () {
+            zone.masterDevice.sonos.leaveGroup().then(function () { }, function () {
                 zone.platform.log(zone.name + ' - Error while leaving group.');
             });
         }
