@@ -3,6 +3,7 @@ const { Listener, DeviceDiscovery } = require('sonos');
 
 const SonosZone = require('./sonos-zone');
 const SonosApi = require('./sonos-api');
+const sonos = require('sonos');
 
 /**
  * Initializes a new platform instance for the Sonos multiroom plugin.
@@ -34,6 +35,8 @@ function SonosMultiroomPlatform(log, config, api) {
     platform.accessories = [];
     platform.devices = [];
     platform.zones = [];
+    platform.groups = [];
+    platform.wait = false;
 
     // Initializes the configuration
     platform.config.zones = platform.config.zones || [];
@@ -105,6 +108,16 @@ function SonosMultiroomPlatform(log, config, api) {
                     device.softwareVersion = deviceDescription.softwareVersion;
                     device.hardwareVersion = deviceDescription.hardwareVersion;
                     device.UUID = deviceDescription.UDN.replace('uuid:','');
+                    device.state = 'STOPPED';
+                    device.mute = false;
+                    device.volume = 10;
+                    device.minVolume = 2;
+                    device.maxVolume = 40;
+                    device.currentTrack = '';
+                    device.tvTrack = false;
+                    device.isCoordinator = false;
+                    device.isGrouped = false;
+                    device.group = [];
 
                     // Gets the possible inputs
                     for (let j = 0; j < deviceDescription.serviceList.service.length; j++) {
@@ -170,91 +183,183 @@ function SonosMultiroomPlatform(log, config, api) {
     });
 }
 
-/**
- * Gets the play state of the group of the specified device.
- * @param device The device.
- * @returns Returns a promise with the play state of the group of the device.
- */
-SonosMultiroomPlatform.prototype.getGroupPlayState = function (device) {
+SonosMultiroomPlatform.prototype.updateSonosModel = function() {
     const platform = this;
 
-    // Gets the coordinator based on all groups
-    return device.sonos.getAllGroups().then(function(groups) {
-        const group = groups.find(function(g) { return g.ZoneGroupMember.some(function(m) { return m.ZoneName === device.zoneName; }); });
-        const coordinatorDevice = platform.devices.find(function(d) { return d.sonos.host === group.host; });
-        return coordinatorDevice.sonos.getCurrentState().then(function(playState) {
-            return playState;
-        });
-    });
-}
+    platform.zones.forEach((z) => {
+        z.sonos.volume = z.device.volume;
+        z.sonos.groupMember = [];
 
-/**
- * Get Sonos volume and coordinator for all of the groups
- * @param zone: the zone that triggered the event 
- */
-SonosMultiroomPlatform.prototype.getGroupVolume = function (zone) {
-    const { Characteristic } = zone.platform;
+        if (z.device.currentTrack.split(':')[0] === 'x-rincon' && z.device.state.toLowerCase() === 'playing') {
+            z.sonos.isGrouped = true;
+            z.sonos.isCoordinator = false;
+            z.sonos.groupCoordinator = z.device.currentTrack.split(':')[1];
 
-    zone.masterDevice.sonos.getAllGroups().then(function(groups) {
-        groups = groups.filter(function(g) { return zone.platform.zones.find(function(z) { return z.masterDevice.UUID === g.Coordinator; }); });
-        
-        groups.forEach(function(group) {
-            group.ZoneGroupMember.forEach(function(m) {
-                const memberZone = zone.platform.zones.find(function(z) { return z.name === m.ZoneName; });
-
-                // check for brightness/volume characteristic
-                if (memberZone.sonosService.getCharacteristic(Characteristic.Brightness)) {
-                    memberZone.masterDevice.sonos.getVolume().then(function(volume) {
-                        memberZone.sonosService.updateCharacteristic(Characteristic.Brightness,volume);
-
-                        // annotate the group coordinator
-                        if (memberZone.masterDevice.UUID === group.Coordinator && group.ZoneGroupMember.length > 1) {
-                            memberZone.sonosService.updateCharacteristic(Characteristic.StatusLowBattery, 1);
-                        } else {
-                            memberZone.sonosService.updateCharacteristic(Characteristic.StatusLowBattery, 0);
-                        }
-                    });
-                }
-            });
-        });
-    });
-}
-
-/**
- * Set Sonos volume
- * @param zone: the zone that triggered the event 
- */
-SonosMultiroomPlatform.prototype.setGroupVolume = function (zone) {
-    const { Characteristic } = zone.platform;
-
-    zone.masterDevice.sonos.getAllGroups().then(function(groups) {
-        const group  = groups.find(function(g) { return zone.platform.zones.find(function(z) { return z.masterDevice.UUID === g.Coordinator; }); });
-        const volume = zone.sonosService.getCharacteristic(Characteristic.Brightness).value;
-
-        // Coordinator Sonos device has relative volume control over the entire group
-        if (group.ZoneGroupMember.length > 1 && zone.masterDevice.UUID === group.Coordinator) {
-            zone.masterDevice.sonos.getVolume().then(function(sonosVolume) {
-                const volumeDiff = volume - sonosVolume;
-
-                if (volumeDiff != 0) {
-                    group.ZoneGroupMember.forEach(function(m) {
-                        const memberZone = zone.platform.zones.find(function(z) { return z.name === m.ZoneName; });
-
-                        memberZone.masterDevice.sonos.getVolume().then(function(value) {
-                            const zoneVolume = Math.max(Math.min(value + volumeDiff, memberZone.maxVolume), memberZone.minVolume);
-                            memberZone.masterDevice.sonos.setVolume(zoneVolume).then(function() {
-                                memberZone.platform.log(memberZone.name + ' - Volume set to: ' + zoneVolume.toString());
-                            });
-                        });
-                    });
-                }
-            });
+            // check if coordinator is playing
+            if (z.platform.zones.find((zs) => zs.device.UUID === z.sonos.groupCoordinator).device.state.toLowerCase() !== 'transitioning') {
+                z.sonos.state = z.platform.zones.find((zs) => zs.device.UUID === z.sonos.groupCoordinator).device.state.toLowerCase() === 'playing';
+            }
         } else {
-            // All other devices are direct volume control
-            zone.masterDevice.sonos.setVolume(volume).then(function() {
-                zone.platform.log(zone.name + ' - Volume set to: ' + volume.toString());
+            if (z.device.state.toLowerCase() !== 'transitioning') {
+                z.sonos.state = z.device.state.toLowerCase() === 'playing';
+            }
+
+            // check if any other zones reference this one
+            const members = z.platform.zones.filter((zs) => { 
+                const trackSplit = zs.device.currentTrack.split(':');
+                return trackSplit[0] === 'x-rincon' && trackSplit[1] === z.sonos.UUID;
             });
+
+            members.forEach((m) => z.sonos.groupMember.push(m.device.UUID));
+
+            z.sonos.isGrouped = z.sonos.groupMember.length > 0;
+            z.sonos.isCoordinator = z.sonos.isGrouped;
         }
+    });
+}
+
+SonosMultiroomPlatform.prototype.setHomeKit = function() {
+    const platform = this;
+    const { Characteristic } = platform;
+
+    platform.zones.forEach((z) => {
+        z.sonosService.updateCharacteristic(Characteristic.On, z.sonos.state);
+        z.sonosService.updateCharacteristic(Characteristic.StatusLowBattery, z.sonos.state && z.sonos.isCoordinator); // FIXME check for zones playing
+        z.sonosService.updateCharacteristic(Characteristic.Brightness, z.sonos.volume);
+    });
+}
+
+SonosMultiroomPlatform.prototype.updateGlobalState = function() {
+    const platform = this;
+    platform.getGlobalState(platform.setGlobalState);
+}
+
+SonosMultiroomPlatform.prototype.getGlobalState = function(callback, zone) {
+    const platform = this;
+    const { Characteristic } = platform;
+    let promises = [];
+
+    // get all groups
+    promises.push(platform.zones[0].device.sonos.getAllGroups().then(function(groups) {
+        const zoneUUID = platform.zones.map(function(z) { return z.device.UUID; });
+        platform.groups = groups.filter(function(g) { return zoneUUID.some(function(zID) { return zID === g.Coordinator; }); });
+    }, function() {
+        // error handling
+    }));
+
+    // get volume and current state of each zone
+    for (let i = 0; i < platform.zones.length; i++) {
+        const device = platform.zones[i].device;
+
+        promises.push(device.sonos.getVolume().then(function(volume) {
+            device.volume = Math.max(volume, device.minVolume);
+        }, function() {
+            // error handling
+        }));
+
+        promises.push(device.sonos.getCurrentState().then(function(state) {
+            device.state = state;
+        }, function() {
+            // error handling
+        }));
+
+        // useful media data
+        if (device.htControl && !platform.zones[i].config.tvOverride) {
+            promises.push(device.sonos.currentTrack().then(function(track) {
+                device.tvTrack = currentTrack && currentTrack.uri && currentTrack.uri.endsWith(':spdif');
+            }));
+        }
+    }
+
+    Promise.all(promises).then(function() {
+        if (zone && callback) {
+            callback(zone);
+        } else if (callback) {
+            callback(platform);
+        }
+        platform.wait = false;
+    }, function() {
+        // error handling
+    });
+}
+
+SonosMultiroomPlatform.prototype.setGlobalState = function(platform) {
+    if (!platform) {
+        platform = this;
+    }
+
+    const { Characteristic } = platform;
+
+    platform.zones.forEach(function(z) {
+        const device = z.device;
+        const group = platform.groups.find(function(g) { return g.ZoneGroupMember.find(function(gm) { return gm.UUID === device.UUID; }); });
+        let state = '';
+
+        // power - conditioned on group coordinator
+        if (device.state !== 'transitioning') {
+            if (device.UUID === group.Coordinator) {
+                state = device.state;
+            } else {
+                state = platform.zones.find(function(z) { return z.device.UUID === group.Coordinator; }).device.state
+            }
+            
+            z.sonosService.updateCharacteristic(Characteristic.On, state === 'playing');
+        }
+
+        // volume
+        if (z.config.volumeControlled) {
+            z.sonosService.updateCharacteristic(Characteristic.Brightness, device.volume);
+            z.sonosService.updateCharacteristic(Characteristic.StatusLowBattery,
+                state === 'playing' && device.UUID === group.Coordinator && group.ZoneGroupMember.length > 1);
+        }
+    });
+}
+
+SonosMultiroomPlatform.prototype.setGroupVolume = function(zone) {
+    const platform = this;
+    platform.getGlobalState(platform.updateGroupVolume, zone);
+}
+
+SonosMultiroomPlatform.prototype.updateGroupVolume = function (zone) {
+    const platform = zone.platform;
+    const device = zone.device;
+    const { Characteristic } = platform;
+
+    let promises = [];
+
+    const group = platform.groups.find(function(g) { return g.ZoneGroupMember.find(function(gm) { return gm.UUID === device.UUID; }); });
+    const volume = zone.sonosService.getCharacteristic(Characteristic.Brightness).value;
+    const volumeDiff = volume - device.volume;
+
+    if (volumeDiff != 0) {
+        if (device.UUID === group.Coordinator && group.ZoneGroupMember.length > 1) {
+            for (let i = 0; i < group.ZoneGroupMember.length; i++) {
+                const memberZone = platform.zones.find(function(z) { return z.name === group.ZoneGroupMember[i].ZoneName; })
+                const zoneDevice = memberZone.device;
+                const zoneVolume = Math.max(Math.min(zoneDevice.volume + volumeDiff, zoneDevice.maxVolume), zoneDevice.minVolume);
+
+                promises.push(zoneDevice.sonos.setVolume(zoneVolume).then(function() {
+                    memberZone.platform.log(memberZone.name + ' - volume set to: ' + zoneVolume.toString());
+                    zoneDevice.volume = zoneVolume;
+                }, function() {
+                    // error handling
+                }));
+            }
+        } else {
+            promises.push(device.sonos.setVolume(volume).then(function() {
+                zone.platform.log(zone.name + ' - volume set to: ' + volume.toString());
+                device.volume = volume;
+            }, function() {
+                // error handling
+            }));
+        }
+    }
+
+    Promise.all(promises).then(function() {
+        platform.setGlobalState();
+        platform.wait = false;
+    }, function() {
+        // error handling
     });
 }
 
