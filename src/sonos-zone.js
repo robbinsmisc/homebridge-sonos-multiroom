@@ -174,7 +174,7 @@ function SonosZone(platform, zoneMasterDevice, config) {
     sonosService.getCharacteristic(Characteristic.On).on('set', function (value, callback) {
         if (zone.sonosService.getCharacteristic(Characteristic.On).value != value ) {
             zone.setState(value);
-            console.log(zone.name + ' on set ' + value.toString())
+            platform.log(zone.name + ' set to ' + value.toString())
         }
 
         callback(null);
@@ -183,7 +183,7 @@ function SonosZone(platform, zoneMasterDevice, config) {
     if (sonosService.getCharacteristic(Characteristic.Brightness)) {
         sonosService.getCharacteristic(Characteristic.Brightness).on('set', function (value, callback) {
             zone.setVolume(value);
-            console.log(zone.name + ' brightness set ' + value.toString())
+            platform.log(zone.name + ' brightness set to ' + value.toString())
             callback(null);
         });
     }
@@ -212,7 +212,7 @@ function SonosZone(platform, zoneMasterDevice, config) {
 
     // Subscribes for changes of the transport control
     zone.device.sonos.on('AVTransport', function (eventData) {
-        console.log(zone.name + ' event ' + eventData.TransportState)
+        platform.log(zone.name + ' event ' + eventData.TransportState)
         
         if (eventData.TransportState) {
             zone.device.state = eventData.TransportState;
@@ -226,9 +226,8 @@ function SonosZone(platform, zoneMasterDevice, config) {
             }
         }
 
-        if (!platform.wait) {
-            zone.platform.updateSonosModel();
-            zone.platform.setHomeKit();
+        if (platform.wait.length == 0) {
+            platform.updateSonosModel();
         }
     });
 
@@ -254,9 +253,8 @@ function SonosZone(platform, zoneMasterDevice, config) {
             zone.speechEnhancementSwitchService.updateCharacteristic(Characteristic.On, eventData.DialogLevel.val === '1');
         }
 
-        if (!platform.wait) {
-            zone.platform.updateSonosModel();
-            zone.platform.setHomeKit();
+        if (platform.wait.length == 0) {
+            platform.updateSonosModel();
         }
     });
 }
@@ -280,8 +278,10 @@ SonosZone.prototype.setVolume = function (volume) {
     }
 
     let promises = [];
+    platform.wait.push(true);
 
     promises.push(zone.device.sonos.setVolume(cmdVolume));
+    zone.sonos.volume = cmdVolume;
 
     if (zone.sonos.isCoordinator && zone.sonos.isGrouped) {
         zone.sonos.groupMember.forEach((gm) => {
@@ -291,16 +291,19 @@ SonosZone.prototype.setVolume = function (volume) {
             
             promises.push(memberZone.device.sonos.setVolume(memberVolume));
             memberZone.sonosService.updateCharacteristic(Characteristic.Brightness, memberVolume);
+            memberZone.sonos.volume = memberVolume;
         });
     }
 
     Promise.all(promises).then(() => {
         setTimeout(() => {
-            console.log('wait off')
-            platform.wait = false;
-            platform.updateSonosModel();
-            platform.setHomeKit();
-        }, 250);
+            platform.wait.shift();
+
+            if (platform.wait.length == 0) {
+                platform.log('Sonos --- Global Sync ---')
+                platform.getGlobalState(platform.updateSonosModel);
+            }
+        }, 20000);
     });
 };
 
@@ -316,7 +319,7 @@ SonosZone.prototype.setState = function (stateValue) {
     const sonos = platform.zones.map((obj) => obj.sonos);
 
     let promises = [];
-    platform.wait = true;
+    platform.wait.push(true);
 
     if (stateValue) {
         // check priority zone
@@ -332,50 +335,88 @@ SonosZone.prototype.setState = function (stateValue) {
 
             // turn on
             promises.push(zone.device.sonos.joinGroup(priority));
+            zone.sonos.state = false;
+            zone.sonos.isCoordinator = false;
+            zone.sonos.isGrouped = true;
+            zone.sonos.groupCoordinator = priorityZone.UUID;
+            zone.sonos.groupMember = [];
 
             // relative volume gains
             if (priorityZone.refVolume && zone.sonos.refVolume) {
                 const memberVolume = priorityZone.volume - priorityZone.refVolume + zone.sonos.refVolume;
                 promises.push(zone.device.sonos.setVolume(memberVolume));
-            }  
+                zone.sonos.volume = memberVolume;
+            }
+
+            if (zone.device.mute) {
+                promises.push(zone.device.sonos.setMuted(false));
+            }
         } else if(!config.isAutoPlayDisabled) {
             // auto play
             promises.push(zone.device.sonos.play());
+            zone.sonos.state = true;
+            zone.sonos.isCoordinator = false;
+            zone.sonos.isGrouped = false;
+            zone.sonos.groupCoordinator = '';
+            zone.sonos.groupMember = [];
+
+            if (zone.device.mute) {
+                promises.push(zone.device.sonos.setMuted(false));
+            }
             
             // auto group
             if (config.autoGroup) {
-                zone.sonosService.setCharacteristic(Characteristic.StatusLowBattery, 1);
+                const autoGroup = config.autoGroup.filter((ag) => platform.zones.find((z) => ag === z.name && !z.sonos.state));
 
-                config.autoGroup.forEach((az) => {
-                    const autoZone = platform.zones.find((z) => z.name == az);
+                if (autoGroup) {
+                    zone.sonosService.setCharacteristic(Characteristic.StatusLowBattery, 1);
+                    zone.sonos.isCoordinator = true;
+                    zone.sonos.isGrouped = true;
 
-                    if (autoZone) {
+                    autoGroup.forEach((ag) => {
+                        const autoZone = platform.zones.find((z) => z.name === ag);
+
                         promises.push(autoZone.device.sonos.joinGroup(zone.name));
+                        autoZone.sonos.state = true;
+                        autoZone.sonos.isCoordinator = false;
+                        autoZone.sonos.isGrouped = true;
+                        autoZone.sonos.groupCoordinator = zone.sonos.UUID;
+                        autoZone.sonos.groupMember = [];
 
-                        // relative volume gains
-                        if (autoZone.sonos.refVolume && zone.sonos.refVolume) {
-                            const azVolume = zone.sonos.volume - zone.sonos.refVolume + autoZone.sonos.refVolume;
-                            promises.push(autoZone.device.sonos.setVolume(azVolume));
-                            autoZone.sonosService.updateCharacteristic(Characteristic.Brightness, azVolume);
+                        if (zone.sonos.groupMember.indexOf(autoZone.sonos.UUID) == -1) {
+                            zone.sonos.groupMember.push(autoZone.sonos.UUID);
                         }
 
+                        // relative volume gains
+                        let azVolume = Math.max(autoZone.sonos.volume, autoZone.device.minVolume);
+
+                        if (autoZone.sonos.refVolume && zone.sonos.refVolume) {
+                            azVolume = zone.sonos.volume - zone.sonos.refVolume + autoZone.sonos.refVolume;
+                            azVolume = Math.max(Math.min(azVolume, autoZone.device.maxVolume), autoZone.device.minVolume);
+
+                            promises.push(autoZone.device.sonos.setVolume(azVolume));
+                            autoZone.sonos.volume = azVolume;   
+                        }
+
+                        if (autoZone.device.mute) {
+                            promises.push(autoZone.device.sonos.setMuted(false));
+                        }
+
+                        autoZone.sonosService.updateCharacteristic(Characteristic.Brightness, azVolume);
                         autoZone.sonosService.updateCharacteristic(Characteristic.On, true);
-                    }
-                });
+                    });
+                }
             }
-            
         } else {
+            // remain off
+            zone.sonos.state = false;
+            zone.sonos.isCoordinator = false;
+            zone.sonos.isGrouped = false;
+            zone.sonos.groupCoordinator = '';
+            zone.sonos.groupMember = [];
+
             setTimeout(() => zone.sonosService.updateCharacteristic(Characteristic.On, false), 250);
         }
-
-        Promise.all(promises).then(() => {
-            setTimeout(() => {
-                console.log('wait off')
-                platform.wait = false;
-                platform.updateSonosModel();
-                platform.setHomeKit();
-            }, 500);
-        });
     } else {
         // turn off group members if group override is flagged
         if (zone.sonos.isCoordinator && zone.sonos.isGrouped && config.groupOverride) {
@@ -388,6 +429,12 @@ SonosZone.prototype.setState = function (stateValue) {
                     Math.max(groupZone.sonos.volume, groupZone.device.minVolume));
 
                 promises.push(groupZone.device.sonos.leaveGroup());
+                groupZone.sonos.state = false;
+                groupZone.sonos.isCoordinator = false;
+                groupZone.sonos.isGrouped = false;
+                groupZone.sonos.groupCoordinator = '';
+                groupZone.sonos.groupMember = [];
+                groupZone.device.currentTrack = '';
             });
         }
 
@@ -398,19 +445,45 @@ SonosZone.prototype.setState = function (stateValue) {
 
         if (zone.device.htControl && zone.device.tvTrack && !config.tvOverride) {
             setTimeout(() => zone.sonosService.updateCharacteristic(Characteristic.On, true), 250);
+            zone.sonos.state = true;
+            zone.sonos.isCoordinator = false;
+            zone.sonos.isGrouped = false;
+            zone.sonos.groupCoordinator = '';
+            zone.sonos.groupMember = [];  
         } else {
-            promises.push(zone.device.sonos.leaveGroup());
-        }
+            // remove from coordinator's group tracking
+            const coordinatorZone = platform.zones.find((z) => z.sonos.UUID === zone.sonos.groupCoordinator);
 
-        Promise.all(promises).then(() => {
-            setTimeout(() => {
-                console.log('wait off')
-                platform.wait = false;
-                platform.updateSonosModel();
-                platform.setHomeKit();
-            }, 500);
-        });
+            if (coordinatorZone) {
+                coordinatorZone.sonos.groupMember = coordinatorZone.sonos.groupMember.filter((z) => z !== zone.sonos.UUID);
+
+                // the coordinator is the only device playing
+                if (coordinatorZone.sonos.groupMember.length == 0) {
+                    coordinatorZone.sonos.isCoordinator = false;
+                    coordinatorZone.sonos.isGrouped = false;
+                    coordinatorZone.sonos.groupCoordinator = '';
+                }
+            }
+
+            promises.push(zone.device.sonos.leaveGroup());
+            zone.sonos.state = false;
+            zone.sonos.isCoordinator = false;
+            zone.sonos.isGrouped = false;
+            zone.sonos.groupCoordinator = '';
+            zone.sonos.groupMember = [];
+        }
     }
+
+    Promise.all(promises).then(() => {
+        setTimeout(() => {
+            platform.wait.shift();
+            
+            if (platform.wait.length == 0) {
+                platform.log('Sonos --- Global Sync ---')
+                platform.getGlobalState(platform.updateSonosModel);
+            }
+        }, 20000);
+    });
 }
 
 /**
