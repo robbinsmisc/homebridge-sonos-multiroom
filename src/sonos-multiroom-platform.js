@@ -3,6 +3,7 @@ const { Listener, DeviceDiscovery } = require('sonos');
 
 const SonosZone = require('./sonos-zone');
 const SonosApi = require('./sonos-api');
+const SonosControl = require('./sonos-control');
 const sonos = require('sonos');
 
 /**
@@ -33,6 +34,7 @@ function SonosMultiroomPlatform(log, config, api) {
     platform.log = log;
     platform.config = config;
     platform.accessories = [];
+    platform.globalControl = [];
     platform.devices = [];
     platform.zones = [];
     platform.groups = [];
@@ -44,6 +46,7 @@ function SonosMultiroomPlatform(log, config, api) {
     platform.config.isApiEnabled = platform.config.isApiEnabled || false;
     platform.config.apiPort = platform.config.apiPort || 40809;
     platform.config.apiToken = platform.config.apiToken || null;
+    platform.config.globalSwitch = platform.config.globalSwitch || null;
 
     // Checks whether the API object is available
     if (!api) {
@@ -152,6 +155,11 @@ function SonosMultiroomPlatform(log, config, api) {
                     platform.zones.push(new SonosZone(platform, zoneMasterDevice, config));
                 }
 
+                // Check and add global controls
+                if (platform.config.globalControl) {
+                    platform.globalControl = new SonosControl(platform, platform.config.globalControl);
+                }
+
                 // Removes the accessories that are not bound to a zone
                 let unusedAccessories = [];
                 let undiscoveredAccessories = platform.accessories.filter(function(a) { return !platform.zones.some(function(z) { return z.name === a.context.name; }); });
@@ -169,7 +177,10 @@ function SonosMultiroomPlatform(log, config, api) {
 
                     platform.accessories.splice(platform.accessories.indexOf(undiscoveredAccessory), 1);
                 }
+                // FIXME global controls
+                unusedAccessories = unusedAccessories.filter((ua) => ua.context.name !== 'Sonos Settings');
                 platform.api.unregisterPlatformAccessories(platform.pluginName, platform.platformName, unusedAccessories);
+                platform.log('Initialization completed.');
             }, function() {
                 platform.log('Error while initializing plugin.');
             });
@@ -245,9 +256,16 @@ SonosMultiroomPlatform.prototype.setHomeKit = function(platform) {
 
     platform.zones.forEach((z) => {
         z.sonosService.updateCharacteristic(Characteristic.On, z.sonos.state);
-        z.sonosService.updateCharacteristic(Characteristic.StatusLowBattery, z.sonos.state && z.sonos.isCoordinator); // FIXME check for zones playing
+        z.sonosService.updateCharacteristic(Characteristic.StatusLowBattery, z.sonos.state && z.sonos.isCoordinator);
         z.sonosService.updateCharacteristic(Characteristic.Brightness, z.sonos.volume);
     });
+
+    // update global controls
+    platform.globalControl.powerService.updateCharacteristic(Characteristic.On, 
+        platform.zones.some((z) => z.sonos.state));
+
+    platform.globalControl.muteService.updateCharacteristic(Characteristic.On, 
+        platform.zones.some((z) => z.device.mute));
 }
 
 SonosMultiroomPlatform.prototype.getGlobalState = function(callback, zone) {

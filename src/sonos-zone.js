@@ -95,7 +95,7 @@ function SonosZone(platform, zoneMasterDevice, config) {
     // Registers the newly created accessories
     platform.api.registerPlatformAccessories(platform.pluginName, platform.platformName, newDeviceAccessories);
 
-    // Removes all unused accessories
+    // Removes all unused accessories associated with the zone
     for (let i = 0; i < unusedDeviceAccessories.length; i++) {
         const unusedDeviceAccessory = unusedDeviceAccessories[i];
         platform.log('Removing unused accessory with zone name ' + unusedDeviceAccessory.context.name + ' and kind ' + unusedDeviceAccessory.context.kind + '.');
@@ -149,9 +149,13 @@ function SonosZone(platform, zoneMasterDevice, config) {
     zone.device.sonos.getCurrentState().then((state) => {
         let onState = state.toLowerCase() === 'playing';
 
-        // FIXME check current state for x-rincon
+        zone.device.sonos.currentTrack().then((track) => {
+            if (track.uri) {
+                onState &&= !track.uri.startsWith('x-rincon'); // FIXME doesn't account for the group
+            }
 
-        sonosService.setCharacteristic(Characteristic.On, onState);
+            sonosService.setCharacteristic(Characteristic.On, onState);
+        });
     });
 
     // Store service
@@ -260,6 +264,7 @@ function SonosZone(platform, zoneMasterDevice, config) {
                 let remotelyControlled = zoneCoordinator.config.remotelyControlled;
                 remotelyControlled &&= zoneCoordinator.sonos.isCoordinator;
                 remotelyControlled &&= zoneCoordinator.sonos.isGrouped;
+                remotelyControlled &&= platform.globalControl.remoteVolumeOverrideService.getCharacteristic(Characteristic.On).value;
                 remotelyControlled &&= platform.wait.length == 0; // ignore HomeKit-invoked events
 
                 if (remotelyControlled) {
@@ -361,13 +366,11 @@ SonosZone.prototype.updateRemoteVolumeControl = function () {
                 platform.getGlobalState(platform.updateSonosModel);
             }
         }, () => {
-            // error handling
+            // FIXME error handling
         });
 
         console.log('volume check'); // FIXME
     }
-
-
 }
 
 /**
@@ -379,7 +382,6 @@ SonosZone.prototype.setVolume = function (volume) {
     const platform = zone.platform;
     const config = zone.config
     const { Characteristic } = platform;
-    const sonos = platform.zones.map((obj) => obj.sonos);
 
     // guard against a minimum volume (brightness of 0)
     const cmdVolume = Math.max(Math.min(volume, zone.device.maxVolume), zone.device.minVolume);
@@ -612,6 +614,7 @@ module.exports = SonosZone;
 
 /* FIXME
 - group volume to zero
-- remote controlled
+- remote controlled bypass switch resets lock reference volume
+- global controls binding behavior
 - start up incorrect info
 */
