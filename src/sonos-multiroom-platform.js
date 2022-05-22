@@ -170,10 +170,6 @@ function SonosMultiroomPlatform(log, config, api) {
                     platform.accessories.splice(platform.accessories.indexOf(undiscoveredAccessory), 1);
                 }
                 platform.api.unregisterPlatformAccessories(platform.pluginName, platform.platformName, unusedAccessories);
-
-                // update everything and initialize the tracking model
-                platform.getGlobalState(platform.updateSonosModel);
-                platform.log('Initialization completed.');
             }, function() {
                 platform.log('Error while initializing plugin.');
             });
@@ -191,8 +187,15 @@ SonosMultiroomPlatform.prototype.updateSonosModel = function(platform, callback)
         platform = this;
     }
 
+    if (platform.wait.length != 0) {
+        return;
+    }
+
     platform.zones.forEach((z) => {
-        z.sonos.volume = z.device.volume;
+        if (z.sonos.volumeLock.length == 0) {
+            z.sonos.volume = z.device.volume;
+        }
+        
         z.sonos.groupMember = [];
 
         if (z.device.currentTrack && z.device.currentTrack.split(':')[0] === 'x-rincon' && z.device.state.toLowerCase() === 'playing') {
@@ -253,37 +256,37 @@ SonosMultiroomPlatform.prototype.getGlobalState = function(callback, zone) {
     let promises = [];
     
     // get all groups
-    promises.push(platform.zones[0].device.sonos.getAllGroups().then(function(groups) {
-        const zoneUUID = platform.zones.map(function(z) { return z.device.UUID; });
-        platform.groups = groups.filter(function(g) { return zoneUUID.some(function(zID) { return zID === g.Coordinator; }); });
-    }, function() {
-        // error handling
+    promises.push(platform.zones[0].device.sonos.getAllGroups().then((groups) => {
+        const zoneUUID = platform.zones.map((z) => z.device.UUID);
+        platform.groups = groups.filter((g) => zoneUUID.some((zID) => zID === g.Coordinator));
+    }, () => {
+        platform.log('--- Global Get Group Error ---')
     }));
 
     // get volume and current state of each zone
     for (let i = 0; i < platform.zones.length; i++) {
         const device = platform.zones[i].device;
 
-        promises.push(device.sonos.getVolume().then(function(volume) {
+        promises.push(device.sonos.getVolume().then((volume) => {
             device.volume = Math.max(volume, device.minVolume);
-        }, function() {
-            // error handling
+        }, () => {
+            platform.log('--- Global Get Volume Error ---')
         }));
 
-        promises.push(device.sonos.getMuted().then(function(mute) {
+        promises.push(device.sonos.getMuted().then((mute) => {
             device.mute = mute;
-        }, function() {
-            // error handling
+        }, () => {
+            platform.log('--- Global Get Mute Error ---')
         }));
 
-        promises.push(device.sonos.getCurrentState().then(function(state) {
+        promises.push(device.sonos.getCurrentState().then((state) => {
             device.state = state;
-        }, function() {
-            // error handling
+        }, () => {
+            platform.log('--- Global Get State Error ---')
         }));
 
         // useful media data
-        promises.push(device.sonos.currentTrack().then(function(track) {
+        promises.push(device.sonos.currentTrack().then((track) => {
             if (track.uri) {
                 device.currentTrack = track.uri;
 
@@ -294,19 +297,19 @@ SonosMultiroomPlatform.prototype.getGlobalState = function(callback, zone) {
                 device.currentTrack = '';
                 device.tvTrack = false;
             }
-        }, function() {
-            // error handling
+        }, () => {
+            platform.log('--- Global Get Track Error ---')
         }));
     }
 
-    Promise.all(promises).then(function() {
+    Promise.all(promises).then(() => {
         if (zone && callback) {
             callback(zone);
         } else if (callback) {
             callback(platform);
         }
-    }, function() {
-        platform.log('Global Get Error')
+    }, () => {
+        platform.log('--- Global Get Error ---')
     });
 }
 
