@@ -28,7 +28,7 @@ function SonosZone(platform, zoneMasterDevice, config) {
     zone.name = zoneMasterDevice.zoneName;
     zone.platform = platform;
     zone.config = config;
-    zone.timeout = {"global": 5000, "volumeControl": 1000, "homekit": 250}; // milliseconds
+    zone.timeout = {"global": 4000, "volumeControl": 2000, "homekit": 250}; // milliseconds
     zone.sonos = {
         'name': zone.name,                          // string: human readable
         'UUID': zone.device.UUID,                   // string
@@ -152,7 +152,8 @@ function SonosZone(platform, zoneMasterDevice, config) {
 
         zone.device.sonos.currentTrack().then((track) => {
             if (track.uri) {
-                onState &&= !track.uri.startsWith('x-rincon'); // FIXME doesn't account for the group
+                // strictly coordinators initialize on
+                onState &&= !track.uri.startsWith('x-rincon');
             }
 
             sonosService.setCharacteristic(Characteristic.On, onState);
@@ -253,7 +254,7 @@ function SonosZone(platform, zoneMasterDevice, config) {
             if (zone.device.volume != volume) {
                 // update volume
                 zone.device.volume = volume;
-                console.log(zone.name + ' volume: ' + zone.device.volume.toString()); // FIXME
+                platform.log(zone.name + ' volume set to ' + zone.device.volume.toString());
 
                 // remote volume control
                 let zoneCoordinator = zone;
@@ -306,7 +307,7 @@ function SonosZone(platform, zoneMasterDevice, config) {
 
         if (eventData.Mute) {
             zone.device.mute = parseInt(eventData.Mute.find(function(obj) { return obj.channel === 'Master' }).val);
-            console.log(zone.name + ' mute: ' + zone.device.mute.toString()); // FIXME
+            platform.log(zone.name + ' mute: ' + zone.device.mute.toString());
         }
         
         // Updates the night mode
@@ -389,21 +390,19 @@ SonosZone.prototype.updateRemoteVolumeControl = function () {
                 z.sonos.volume = newVolume[idx];
 
                 promises.push(z.device.sonos.setVolume(newVolume[idx]).then(() => {
-                    console.log(z.name + ' volume updated to ' + newVolume[idx].toString() + ' (volume controlled)'); // FIXME
+                    platform.log(z.name + ' volume updated to ' + newVolume[idx].toString() + ' (volume controlled)');
                 }));
             }
         });
 
         Promise.all(promises).then(() => {
             if (platform.wait.length == 0) {
-                platform.log('Sonos --- Global Sync ---')
+                platform.log('Sonos --- Global Sync (volume controlled) ---');
                 platform.getGlobalState(platform.updateSonosModel);
             }
         }, () => {
-            // FIXME error handling
+            platform.log('--- Remote Volume Control Error ---');
         });
-
-        console.log('volume check'); // FIXME
     }
 }
 

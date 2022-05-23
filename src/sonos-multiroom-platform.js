@@ -292,7 +292,7 @@ SonosMultiroomPlatform.prototype.getGlobalState = function(callback) {
         const zoneUUID = platform.zones.map((z) => z.device.UUID);
         platform.groups = groups.filter((g) => zoneUUID.some((zID) => zID === g.Coordinator));
     }, () => {
-        platform.log('--- Global Get Group Error ---')
+        platform.log('--- Global Get Group Error ---');
     }));
 
     // get volume and current state of each zone
@@ -302,19 +302,19 @@ SonosMultiroomPlatform.prototype.getGlobalState = function(callback) {
         promises.push(device.sonos.getVolume().then((volume) => {
             device.volume = Math.max(volume, device.minVolume);
         }, () => {
-            platform.log('--- Global Get Volume Error ---')
+            platform.log('--- Global Get Volume Error ---');
         }));
 
         promises.push(device.sonos.getMuted().then((mute) => {
             device.mute = mute;
         }, () => {
-            platform.log('--- Global Get Mute Error ---')
+            platform.log('--- Global Get Mute Error ---');
         }));
 
         promises.push(device.sonos.getCurrentState().then((state) => {
             device.state = state;
         }, () => {
-            platform.log('--- Global Get State Error ---')
+            platform.log('--- Global Get State Error ---');
         }));
 
         // useful media data
@@ -330,7 +330,7 @@ SonosMultiroomPlatform.prototype.getGlobalState = function(callback) {
                 device.tvTrack = false;
             }
         }, () => {
-            platform.log('--- Global Get Track Error ---')
+            platform.log('--- Global Get Track Error ---');
         }));
     }
 
@@ -339,7 +339,7 @@ SonosMultiroomPlatform.prototype.getGlobalState = function(callback) {
             callback(platform);
         }
     }, () => {
-        platform.log('--- Global Get Error ---')
+        platform.log('--- Global Get Error ---');
     });
 }
 
