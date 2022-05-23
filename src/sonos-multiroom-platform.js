@@ -1,4 +1,3 @@
-
 const { Listener, DeviceDiscovery } = require('sonos');
 
 const SonosZone = require('./sonos-zone');
@@ -177,8 +176,8 @@ function SonosMultiroomPlatform(log, config, api) {
 
                     platform.accessories.splice(platform.accessories.indexOf(undiscoveredAccessory), 1);
                 }
-                // FIXME global controls
-                unusedAccessories = unusedAccessories.filter((ua) => ua.context.name !== 'Sonos Settings');
+                // Remove the global control accessory from the unusedAccessories array
+                unusedAccessories = unusedAccessories.filter((ua) => ua.context.name !== platform.globalControl.name);
                 platform.api.unregisterPlatformAccessories(platform.pluginName, platform.platformName, unusedAccessories);
                 platform.log('Initialization completed.');
             }, function() {
@@ -193,6 +192,12 @@ function SonosMultiroomPlatform(log, config, api) {
     });
 }
 
+/**
+ * This function reference locally stored (observed) devices settings to update a local
+ * model of the predicted states for all of the sonos device.  Periodically synced with the global get.
+ * @param platform: The SonosMultiroomPlatform instance.
+ * @param callback: An optional callback function
+ */
 SonosMultiroomPlatform.prototype.updateSonosModel = function(platform, callback) {
     if (!platform) {
         platform = this;
@@ -247,6 +252,10 @@ SonosMultiroomPlatform.prototype.updateSonosModel = function(platform, callback)
     }
 }
 
+/**
+ * This function translates current device settings to the HomeKit service characteristics.
+ * @param platform: The SonosMultiroomPlatform instance.
+ */
 SonosMultiroomPlatform.prototype.setHomeKit = function(platform) {
     if (!platform) {
         platform = this;
@@ -268,7 +277,12 @@ SonosMultiroomPlatform.prototype.setHomeKit = function(platform) {
         platform.zones.some((z) => z.device.mute));
 }
 
-SonosMultiroomPlatform.prototype.getGlobalState = function(callback, zone) {
+/**
+ * This function loops over all relevant settings for every sonos device.  
+ * Designed to be called periodically, not necessarily regularly.
+ * @param callback: An optional callback function
+ */
+SonosMultiroomPlatform.prototype.getGlobalState = function(callback) {
     const platform = this;
     const { Characteristic } = platform;
     let promises = [];
@@ -321,9 +335,7 @@ SonosMultiroomPlatform.prototype.getGlobalState = function(callback, zone) {
     }
 
     Promise.all(promises).then(() => {
-        if (zone && callback) {
-            callback(zone);
-        } else if (callback) {
+        if (callback) {
             callback(platform);
         }
     }, () => {

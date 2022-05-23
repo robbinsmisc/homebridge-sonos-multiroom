@@ -1,14 +1,21 @@
 const { Sonos } = require("sonos");
 const sonos = require("sonos");
 
+/**
+ * Global control accessory; e.g., mute, powering off, etc.
+ * @param platform: The SonosMultiroomPlatform instance.
+ * @param config: The globalControl config
+ */
 function SonosControl(platform, config) {
     const control = this;
     const { UUIDGen, Accessory, Characteristic, Service } = platform;
 
+    // Set the name, platform, config
     control.platform = platform;
     control.config = config;
     control.name = config.name;
 
+    // Global control is a single accessory with varying services
     let switchAccessory = platform.accessories.find((a) => a.context.name === control.name);
 
     if (!switchAccessory) {
@@ -19,6 +26,7 @@ function SonosControl(platform, config) {
         platform.api.registerPlatformAccessories(platform.pluginName, platform.platformName, [switchAccessory]);
     }
 
+    // Strictly powers off all of the zone
     if (config.switch.power) {
         let powerService = switchAccessory.getServiceByUUIDAndSubType(Service.Switch, 'Power');
 
@@ -35,6 +43,7 @@ function SonosControl(platform, config) {
                     z.sonos.state = false;
                 });
             } else {
+                // Ignore the on command
                 setTimeout(() => powerService.updateCharacteristic(Characteristic.On, false), 250);
             }
 
@@ -45,6 +54,7 @@ function SonosControl(platform, config) {
         control.powerService = powerService;
     }
 
+    // Global mute command
     if (config.switch.mute) {
         let muteService = switchAccessory.getServiceByUUIDAndSubType(Service.Switch, 'Mute');
 
@@ -66,6 +76,7 @@ function SonosControl(platform, config) {
         control.muteService = muteService;
     }
 
+    // Enable/Disable the remote volume control feature
     if (config.switch.remoteVolumeOverride) {
         let remoteVolumeOverrideService = switchAccessory.getServiceByUUIDAndSubType(Service.Switch, 'RemoteVolumeOverride');
 
@@ -74,13 +85,23 @@ function SonosControl(platform, config) {
         }
         
         remoteVolumeOverrideService.updateCharacteristic(Characteristic.On, platform.zones.some((z) => z.config.remotelyControlled));
+        remoteVolumeOverrideService.getCharacteristic(Characteristic.On).on('set', (value, callback) => {
+            if (value) {
+                platform.log('Remote volume control is enabled');
+                platform.zones.forEach((z) => {
+                    // reset the remoteVolume
+                    z.sonos.remoteVolume = z.sonos.volume;
+                });
+            } else {
+                platform.log('Remote volume control is disabled');
+            }
+
+            callback(null);
+        });
 
         // store the service
         control.remoteVolumeOverrideService = remoteVolumeOverrideService;
     }
-
-
-
 }
 
 /**
