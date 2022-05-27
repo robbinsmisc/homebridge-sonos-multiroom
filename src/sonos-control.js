@@ -1,10 +1,17 @@
+/**
+ * power                    (default false) switch to turn off all zones
+ * mute                     (default false) switch to unmute currerntly muted or mute all
+ * remoteVolumeOverride     (default false) 
+ * remoteAutoGroupOverride  (default false) 
+ */
+
 const { Sonos } = require("sonos");
 const sonos = require("sonos");
 
 /**
  * Global control accessory; e.g., mute, powering off, etc.
  * @param platform: The SonosMultiroomPlatform instance.
- * @param config: The globalControl config
+ * @param config: The global config
  */
 function SonosControl(platform, config) {
     const control = this;
@@ -40,7 +47,7 @@ function SonosControl(platform, config) {
                 platform.zones.forEach((z) => {
                     z.device.sonos.leaveGroup();
                     z.device.state = 'STOPPED';
-                    z.sonos.state = false;
+                    z.local.state = false;
                 });
             } else {
                 // Ignore the on command
@@ -52,6 +59,8 @@ function SonosControl(platform, config) {
 
         // store the service
         control.powerService = powerService;
+    } else {
+        config.switch.power = false;
     }
 
     // Global mute command
@@ -74,6 +83,8 @@ function SonosControl(platform, config) {
 
         // store the service
         control.muteService = muteService;
+    } else {
+        config.switch.mute = false;
     }
 
     // Enable/Disable the remote volume control feature
@@ -81,7 +92,7 @@ function SonosControl(platform, config) {
         let remoteVolumeOverrideService = switchAccessory.getServiceByUUIDAndSubType(Service.Switch, 'RemoteVolumeOverride');
 
         if (!remoteVolumeOverrideService) {
-            remoteVolumeOverrideService = switchAccessory.addService(Service.Switch, 'Remote Volume Control', 'RemoteVolumeOverride');
+            remoteVolumeOverrideService = switchAccessory.addService(Service.Switch, 'Remote Volume', 'RemoteVolumeOverride');
         }
         
         remoteVolumeOverrideService.updateCharacteristic(Characteristic.On, platform.zones.some((z) => z.config.remotelyControlled));
@@ -90,7 +101,7 @@ function SonosControl(platform, config) {
                 platform.log('Remote volume control is enabled');
                 platform.zones.forEach((z) => {
                     // reset the remoteVolume
-                    z.sonos.remoteVolume = z.sonos.volume;
+                    z.local.remoteVolume = z.local.volume;
                 });
             } else {
                 platform.log('Remote volume control is disabled');
@@ -101,6 +112,25 @@ function SonosControl(platform, config) {
 
         // store the service
         control.remoteVolumeOverrideService = remoteVolumeOverrideService;
+    } else {
+        config.switch.remoteVolumeOverride = false;
+    }
+
+    // Global remote auto group feature
+    if (config.switch.remoteAutoGroupOverride) {
+        let remoteAutoGroupService = switchAccessory.getServiceByUUIDAndSubType(Service.Switch, 'RemoteAutoGroup');
+
+        if (!remoteAutoGroupService) {
+            remoteAutoGroupService = switchAccessory.addService(Service.Switch, 'Remote Auto Group', 'RemoteAutoGroup');
+        }
+        
+        remoteAutoGroupService.updateCharacteristic(Characteristic.On, false);
+        remoteAutoGroupService.updateCharacteristic(Characteristic.On, platform.zones.some((z) => z.config.remoteAutoGroup));
+
+        // store the service
+        control.remoteAutoGroupService = remoteAutoGroupService;
+    } else {
+        config.switch.remoteAutoGroupOverride = false;
     }
 }
 

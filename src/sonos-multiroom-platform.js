@@ -33,7 +33,7 @@ function SonosMultiroomPlatform(log, config, api) {
     platform.log = log;
     platform.config = config;
     platform.accessories = [];
-    platform.globalControl = [];
+    platform.global = [];
     platform.devices = [];
     platform.zones = [];
     platform.groups = [];
@@ -45,7 +45,7 @@ function SonosMultiroomPlatform(log, config, api) {
     platform.config.isApiEnabled = platform.config.isApiEnabled || false;
     platform.config.apiPort = platform.config.apiPort || 40809;
     platform.config.apiToken = platform.config.apiToken || null;
-    platform.config.globalSwitch = platform.config.globalSwitch || null;
+    platform.config.global = platform.config.global || null;
 
     // Checks whether the API object is available
     if (!api) {
@@ -155,8 +155,8 @@ function SonosMultiroomPlatform(log, config, api) {
                 }
 
                 // Check and add global controls
-                if (platform.config.globalControl) {
-                    platform.globalControl = new SonosControl(platform, platform.config.globalControl);
+                if (platform.config.global) {
+                    platform.global = new SonosControl(platform, platform.config.global);
                 }
 
                 // Removes the accessories that are not bound to a zone
@@ -177,7 +177,7 @@ function SonosMultiroomPlatform(log, config, api) {
                     platform.accessories.splice(platform.accessories.indexOf(undiscoveredAccessory), 1);
                 }
                 // Remove the global control accessory from the unusedAccessories array
-                unusedAccessories = unusedAccessories.filter((ua) => ua.context.name !== platform.globalControl.name);
+                unusedAccessories = unusedAccessories.filter((ua) => ua.context.name !== platform.global.name);
                 platform.api.unregisterPlatformAccessories(platform.pluginName, platform.platformName, unusedAccessories);
                 platform.log('Initialization completed.');
             }, function() {
@@ -208,40 +208,40 @@ SonosMultiroomPlatform.prototype.updateSonosModel = function(platform, callback)
     }
 
     platform.zones.forEach((z) => {
-        if (z.sonos.volumeLock.length == 0) {
-            z.sonos.volume = z.device.volume;
+        if (z.local.volumeLock.length == 0) {
+            z.local.volume = z.device.volume;
         }
         
-        z.sonos.groupMember = [];
+        z.local.groupMember = [];
 
         if (z.device.currentTrack && z.device.currentTrack.split(':')[0] === 'x-rincon' && z.device.state.toLowerCase() === 'playing') {
-            z.sonos.isGrouped = true;
-            z.sonos.isCoordinator = false;
-            z.sonos.groupCoordinator = z.device.currentTrack.split(':')[1];
+            z.local.isGrouped = true;
+            z.local.isCoordinator = false;
+            z.local.groupCoordinator = z.device.currentTrack.split(':')[1];
 
             // check if coordinator is playing
-            if (z.platform.zones.find((zs) => zs.device.UUID === z.sonos.groupCoordinator).device.state.toLowerCase() !== 'transitioning') {
-                z.sonos.state = z.platform.zones.find((zs) => zs.device.UUID === z.sonos.groupCoordinator).device.state.toLowerCase() === 'playing';
+            if (z.platform.zones.find((zs) => zs.device.UUID === z.local.groupCoordinator).device.state.toLowerCase() !== 'transitioning') {
+                z.local.state = z.platform.zones.find((zs) => zs.device.UUID === z.local.groupCoordinator).device.state.toLowerCase() === 'playing';
             }
         } else {
             if (z.device.state.toLowerCase() !== 'transitioning') {
-                z.sonos.state = z.device.state.toLowerCase() === 'playing';
+                z.local.state = z.device.state.toLowerCase() === 'playing';
             }
 
             // check if any other zones reference this one
             const members = z.platform.zones.filter((zs) => { 
                 if (zs.device.currentTrack) {
                     const trackSplit = zs.device.currentTrack.split(':');
-                    return trackSplit[0] === 'x-rincon' && trackSplit[1] === z.sonos.UUID;
+                    return trackSplit[0] === 'x-rincon' && trackSplit[1] === z.local.UUID;
                 }
 
                 return false;
             });
 
-            members.forEach((m) => z.sonos.groupMember.push(m.device.UUID));
+            members.forEach((m) => z.local.groupMember.push(m.device.UUID));
 
-            z.sonos.isGrouped = z.sonos.groupMember.length > 0;
-            z.sonos.isCoordinator = z.sonos.isGrouped;
+            z.local.isGrouped = z.local.groupMember.length > 0;
+            z.local.isCoordinator = z.local.isGrouped;
         }
     });
 
@@ -264,17 +264,21 @@ SonosMultiroomPlatform.prototype.setHomeKit = function(platform) {
     const { Characteristic } = platform;
 
     platform.zones.forEach((z) => {
-        z.sonosService.updateCharacteristic(Characteristic.On, z.sonos.state);
-        z.sonosService.updateCharacteristic(Characteristic.StatusLowBattery, z.sonos.state && z.sonos.isCoordinator);
-        z.sonosService.updateCharacteristic(Characteristic.Brightness, z.sonos.volume);
+        z.sonosService.updateCharacteristic(Characteristic.On, z.local.state);
+        z.sonosService.updateCharacteristic(Characteristic.StatusLowBattery, z.local.state && z.local.isCoordinator);
+        z.sonosService.updateCharacteristic(Characteristic.Brightness, z.local.volume);
     });
 
     // update global controls
-    platform.globalControl.powerService.updateCharacteristic(Characteristic.On, 
-        platform.zones.some((z) => z.sonos.state));
+    if (platform.global.powerService) {
+        platform.global.powerService.updateCharacteristic(Characteristic.On, 
+            platform.zones.some((z) => z.local.state));
+    }
 
-    platform.globalControl.muteService.updateCharacteristic(Characteristic.On, 
-        platform.zones.some((z) => z.device.mute));
+    if (platform.global.mute) {
+        platform.global.muteService.updateCharacteristic(Characteristic.On, 
+            platform.zones.some((z) => z.device.mute));
+    }
 }
 
 /**

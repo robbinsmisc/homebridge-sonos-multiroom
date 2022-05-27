@@ -7,7 +7,8 @@
 * "volumeControlled": True | False      (default false) creates a dimmable lightbulb accessory
 * "groupOverride":  True | False        (default false) coordinator can turn off the entire group
 * "tvOverride": True | False            (default false) allow HT controlled devices to be turned off
-* "remotelyControlled":  True | False   (default false) 
+* "remotelyControlled":  True | False   (default false) used to adjust group volume rather than strictly one zone 
+* "remoteAutoGroup": True | False       (default false) used to auto group when group is master is externally played
 */
 
 const { Sonos } = require("sonos");
@@ -29,13 +30,13 @@ function SonosZone(platform, zoneMasterDevice, config) {
     zone.platform = platform;
     zone.config = config;
     zone.timeout = {"global": 4000, "volumeControl": 2000, "homekit": 250}; // milliseconds
-    zone.sonos = {
+    zone.local = {
         'name': zone.name,                          // string: human readable
         'UUID': zone.device.UUID,                   // string
         'state': false,                             // true | false: playing = true, transitioning = previous, o.w. = off
         'volume': 10,                               // int bounded by device min/max volume
-        'refVolume': config.defaultGroupVolume,     // int
-        'remoteVolume': config.defaultGroupVolume,  // int
+        'refVolume': config.defaultGroupVolume,     // int volume referenced for auto-grouping (calculate relative gain)
+        'remoteVolume': config.defaultGroupVolume,  // int volume reference for remotely controlled volumes (calculate relative gain)
         'volumeLock': [],                           // array of booleans
         'isGrouped': false,                         // true | false
         'isCoordinator': false,                     // true | false
@@ -141,8 +142,8 @@ function SonosZone(platform, zoneMasterDevice, config) {
         
         // initialize volume/brightness
         zone.device.sonos.getVolume().then(function(volume) {
-            zone.sonos.remoteVolume = volume;
-            zone.sonos.volume = volume;
+            zone.local.remoteVolume = volume;
+            zone.local.volume = volume;
             sonosService.setCharacteristic(Characteristic.Brightness, volume);
         });
     }
@@ -191,7 +192,7 @@ function SonosZone(platform, zoneMasterDevice, config) {
     sonosService.getCharacteristic(Characteristic.On).on('set', function (value, callback) {
         if (zone.sonosService.getCharacteristic(Characteristic.On).value != value ) {
             zone.setState(value);
-            platform.log(zone.name + ' set to ' + value.toString())
+            //platform.log(zone.name + ' set to ' + value.toString())
         }
 
         callback(null);
@@ -200,7 +201,7 @@ function SonosZone(platform, zoneMasterDevice, config) {
     if (sonosService.getCharacteristic(Characteristic.Brightness)) {
         sonosService.getCharacteristic(Characteristic.Brightness).on('set', function (value, callback) {
             zone.setVolume(value);
-            platform.log(zone.name + ' brightness set to ' + value.toString())
+            //platform.log(zone.name + ' brightness set to ' + value.toString())
             callback(null);
         });
     }
@@ -233,6 +234,16 @@ function SonosZone(platform, zoneMasterDevice, config) {
         
         if (eventData.TransportState) {
             zone.device.state = eventData.TransportState;
+
+            if (platform.global.remoteAutoGroupService) {
+                // zone playing and local state if false is equivalent to HomeKit turn-on event
+                if (zone.config.remoteAutoGroup && !zone.local.state 
+                        && platform.global.remoteAutoGroupService.getCharacteristic(Characteristic.On).value 
+                        && eventData.TransportState.toLowerCase() === 'playing') {
+                    zone.sonosService.updateCharacteristic(Characteristic.On, true);
+                    zone.setState(true);
+                }
+            }
         }
 
         if (eventData.CurrentTrackURI) {
@@ -259,23 +270,23 @@ function SonosZone(platform, zoneMasterDevice, config) {
                 // remote volume control
                 let zoneCoordinator = zone;
 
-                if (!zone.sonos.isCoordinator && zone.sonos.isGrouped) {
-                    zoneCoordinator = platform.zones.find((z) => z.sonos.UUID === zone.sonos.groupCoordinator);   
+                if (!zone.local.isCoordinator && zone.local.isGrouped) {
+                    zoneCoordinator = platform.zones.find((z) => z.local.UUID === zone.local.groupCoordinator);   
                 }
 
                 let remotelyControlled = zoneCoordinator.config.remotelyControlled;
-                remotelyControlled &&= zoneCoordinator.sonos.isCoordinator;
-                remotelyControlled &&= zoneCoordinator.sonos.isGrouped;
-                remotelyControlled &&= platform.globalControl.remoteVolumeOverrideService.getCharacteristic(Characteristic.On).value;
+                remotelyControlled &&= zoneCoordinator.local.isCoordinator;
+                remotelyControlled &&= zoneCoordinator.local.isGrouped;
+                remotelyControlled &&= platform.global.remoteVolumeOverrideService.getCharacteristic(Characteristic.On).value;
                 remotelyControlled &&= platform.wait.length == 0; // ignore HomeKit-invoked events
 
                 if (remotelyControlled) {
                     console.log(zone.name + ' is remotely controlled') // FIXME
 
                     // push volume lock promise
-                    zoneCoordinator.sonos.volumeLock.push(true);
-                    zoneCoordinator.sonos.groupMember.forEach((gm) => {
-                        platform.zones.find((z) => z.sonos.UUID === gm).sonos.volumeLock.push(true);
+                    zoneCoordinator.local.volumeLock.push(true);
+                    zoneCoordinator.local.groupMember.forEach((gm) => {
+                        platform.zones.find((z) => z.local.UUID === gm).local.volumeLock.push(true);
                     });
 
                     let volumeLockTimer = new Promise((resolve) => {
@@ -290,12 +301,12 @@ function SonosZone(platform, zoneMasterDevice, config) {
                         // note that the coordinator calls the update function
                         zoneCoordinator.updateRemoteVolumeControl();
 
-                        zoneCoordinator.sonos.volumeLock.shift();
-                        zoneCoordinator.sonos.groupMember.forEach((gm) => {
-                            platform.zones.find((z) => z.sonos.UUID === gm).sonos.volumeLock.shift();
+                        zoneCoordinator.local.volumeLock.shift();
+                        zoneCoordinator.local.groupMember.forEach((gm) => {
+                            platform.zones.find((z) => z.local.UUID === gm).local.volumeLock.shift();
                         });  
 
-                        if (zoneCoordinator.sonos.volumeLock.length == 0) {
+                        if (zoneCoordinator.local.volumeLock.length == 0) {
                             platform.updateSonosModel(); 
                         }                  
                     }, () => {
@@ -331,24 +342,24 @@ function SonosZone(platform, zoneMasterDevice, config) {
 }
 
 /**
- * 
+ * determine zone volumes from external volume control input/feedback
  */
 SonosZone.prototype.updateRemoteVolumeControl = function () {
     const zone = this;
     const platform = zone.platform;
 
-    if (zone.sonos.volumeLock.length > 1) {
+    if (zone.local.volumeLock.length > 1) {
         return;
     } else {
         // compare volumes and update the entire group
-        const group = JSON.parse(JSON.stringify(zone.sonos.groupMember));
-        group.push(zone.sonos.UUID);
-        const zones = platform.zones.filter((z) => group.some((g) => g === z.sonos.UUID));
+        const group = JSON.parse(JSON.stringify(zone.local.groupMember));
+        group.push(zone.local.UUID);
+        const zones = platform.zones.filter((z) => group.some((g) => g === z.local.UUID));
 
         // volumes
         const deviceVolume = zones.map((z) => z.device.volume);     // updated every time sonos reports and event
-        const modelVolume = zones.map((z) => z.sonos.volume);       // updated internally and synced after HomeKit actions are complete
-        const refVolume = zones.map((z) => z.sonos.remoteVolume);   // snapshot when the group was created
+        const modelVolume = zones.map((z) => z.local.volume);       // updated internally and synced after HomeKit actions are complete
+        const refVolume = zones.map((z) => z.local.remoteVolume);   // snapshot when the group was created
 
         // exit if relative gain is the same for every zone
          if (deviceVolume.map((dv,idx) => dv - refVolume[idx]).every((val, idx, arr) => val === arr[0])) {
@@ -387,7 +398,7 @@ SonosZone.prototype.updateRemoteVolumeControl = function () {
 
         zones.forEach((z,idx) => {
             if (deviceVolume[idx] != newVolume[idx]) {
-                z.sonos.volume = newVolume[idx];
+                z.local.volume = newVolume[idx];
 
                 promises.push(z.device.sonos.setVolume(newVolume[idx]).then(() => {
                     platform.log(z.name + ' volume updated to ' + newVolume[idx].toString() + ' (volume controlled)');
@@ -426,23 +437,28 @@ SonosZone.prototype.setVolume = function (volume) {
     let promises = [];
     platform.wait.push(true);
 
-    promises.push(zone.device.sonos.setVolume(cmdVolume));
+    promises.push(zone.device.sonos.setVolume(cmdVolume).then(() => {
+        platform.log(zone.name + ' volume set to ' + cmdVolume.toString());
+    }));
 
-    if (zone.sonos.isCoordinator && zone.sonos.isGrouped) {
-        zone.sonos.groupMember.forEach((gm) => {
-            const memberZone = platform.zones.find((z) => z.sonos.UUID === gm);
-            const memberVolume = Math.max(Math.min(cmdVolume - zone.sonos.volume + memberZone.sonos.volume, 
+    if (zone.local.isCoordinator && zone.local.isGrouped) {
+        zone.local.groupMember.forEach((gm) => {
+            const memberZone = platform.zones.find((z) => z.local.UUID === gm);
+            const memberVolume = Math.max(Math.min(cmdVolume - zone.local.volume + memberZone.local.volume, 
                 memberZone.device.maxVolume), memberZone.device.minVolume);
             
-            promises.push(memberZone.device.sonos.setVolume(memberVolume));
+            promises.push(memberZone.device.sonos.setVolume(memberVolume).then(() => {
+                platform.log(memberZone.name + ' volume set to ' + memberVolume.toString());
+            }));
+
             memberZone.sonosService.updateCharacteristic(Characteristic.Brightness, memberVolume);
-            memberZone.sonos.volume = memberVolume;
-            memberZone.sonos.remoteVolume = memberZone.sonos.volume;
+            memberZone.local.volume = memberVolume;
+            memberZone.local.remoteVolume = memberZone.local.volume;
         });
     }
 
-    zone.sonos.volume = cmdVolume;
-    zone.sonos.remoteVolume = zone.sonos.volume;
+    zone.local.volume = cmdVolume;
+    zone.local.remoteVolume = zone.local.volume;
 
     Promise.all(promises).then(() => {
         setTimeout(() => {
@@ -465,7 +481,7 @@ SonosZone.prototype.setState = function (stateValue) {
     const platform = zone.platform;
     const config = zone.config
     const { Characteristic } = platform;
-    const sonos = platform.zones.map((obj) => obj.sonos);
+    const sonos = platform.zones.map((obj) => obj.local);
 
     let promises = [];
     platform.wait.push(true);
@@ -484,21 +500,21 @@ SonosZone.prototype.setState = function (stateValue) {
 
             // turn on
             promises.push(zone.device.sonos.joinGroup(priority));
-            zone.sonos.state = false;
-            zone.sonos.isCoordinator = false;
-            zone.sonos.isGrouped = true;
-            zone.sonos.groupCoordinator = prioritySonos.UUID;
-            zone.sonos.groupMember = [];
+            zone.local.state = false;
+            zone.local.isCoordinator = false;
+            zone.local.isGrouped = true;
+            zone.local.groupCoordinator = prioritySonos.UUID;
+            zone.local.groupMember = [];
 
             // relative volume gains
-            if (prioritySonos.refVolume && zone.sonos.refVolume) {
-                const memberVolume = prioritySonos.volume - prioritySonos.refVolume + zone.sonos.refVolume;
+            if (prioritySonos.refVolume && zone.local.refVolume) {
+                const memberVolume = prioritySonos.volume - prioritySonos.refVolume + zone.local.refVolume;
                 promises.push(zone.device.sonos.setVolume(memberVolume));
-                zone.sonos.volume = memberVolume;
+                zone.local.volume = memberVolume;
             }
 
             prioritySonos.remoteVolume = prioritySonos.volume;
-            zone.sonos.remoteVolume = sonos.volume;
+            zone.local.remoteVolume = sonos.volume;
 
             if (zone.device.mute) {
                 promises.push(zone.device.sonos.setMuted(false));
@@ -506,12 +522,12 @@ SonosZone.prototype.setState = function (stateValue) {
         } else if(!config.isAutoPlayDisabled) {
             // auto play
             promises.push(zone.device.sonos.play());
-            zone.sonos.state = true;
-            zone.remoteVolume = zone.sonos.volume;
-            zone.sonos.isCoordinator = false;
-            zone.sonos.isGrouped = false;
-            zone.sonos.groupCoordinator = '';
-            zone.sonos.groupMember = [];
+            zone.local.state = true;
+            zone.remoteVolume = zone.local.volume;
+            zone.local.isCoordinator = false;
+            zone.local.isGrouped = false;
+            zone.local.groupCoordinator = '';
+            zone.local.groupMember = [];
 
             if (zone.device.mute) {
                 promises.push(zone.device.sonos.setMuted(false));
@@ -519,39 +535,39 @@ SonosZone.prototype.setState = function (stateValue) {
             
             // auto group
             if (config.autoGroup) {
-                const autoGroup = config.autoGroup.filter((ag) => platform.zones.find((z) => ag === z.name && !z.sonos.state));
+                const autoGroup = config.autoGroup.filter((ag) => platform.zones.find((z) => ag === z.name && !z.local.state));
 
                 if (autoGroup) {
                     zone.sonosService.setCharacteristic(Characteristic.StatusLowBattery, 1);
-                    zone.sonos.isCoordinator = true;
-                    zone.sonos.isGrouped = true;
+                    zone.local.isCoordinator = true;
+                    zone.local.isGrouped = true;
 
                     autoGroup.forEach((ag) => {
                         const autoZone = platform.zones.find((z) => z.name === ag);
 
                         promises.push(autoZone.device.sonos.joinGroup(zone.name));
-                        autoZone.sonos.state = true;
-                        autoZone.sonos.isCoordinator = false;
-                        autoZone.sonos.isGrouped = true;
-                        autoZone.sonos.groupCoordinator = zone.sonos.UUID;
-                        autoZone.sonos.groupMember = [];
+                        autoZone.local.state = true;
+                        autoZone.local.isCoordinator = false;
+                        autoZone.local.isGrouped = true;
+                        autoZone.local.groupCoordinator = zone.local.UUID;
+                        autoZone.local.groupMember = [];
 
-                        if (zone.sonos.groupMember.indexOf(autoZone.sonos.UUID) == -1) {
-                            zone.sonos.groupMember.push(autoZone.sonos.UUID);
+                        if (zone.local.groupMember.indexOf(autoZone.local.UUID) == -1) {
+                            zone.local.groupMember.push(autoZone.local.UUID);
                         }
 
                         // relative volume gains
-                        let azVolume = Math.max(autoZone.sonos.volume, autoZone.device.minVolume);
+                        let azVolume = Math.max(autoZone.local.volume, autoZone.device.minVolume);
 
-                        if (autoZone.sonos.refVolume && zone.sonos.refVolume) {
-                            azVolume = zone.sonos.volume - zone.sonos.refVolume + autoZone.sonos.refVolume;
+                        if (autoZone.local.refVolume && zone.local.refVolume) {
+                            azVolume = zone.local.volume - zone.local.refVolume + autoZone.local.refVolume;
                             azVolume = Math.max(Math.min(azVolume, autoZone.device.maxVolume), autoZone.device.minVolume);
 
                             promises.push(autoZone.device.sonos.setVolume(azVolume));
-                            autoZone.sonos.volume = azVolume;   
+                            autoZone.local.volume = azVolume;   
                         }
 
-                        autoZone.sonos.remoteVolume = autoZone.sonos.volume;
+                        autoZone.local.remoteVolume = autoZone.local.volume;
 
                         if (autoZone.device.mute) {
                             promises.push(autoZone.device.sonos.setMuted(false));
@@ -564,68 +580,68 @@ SonosZone.prototype.setState = function (stateValue) {
             }
         } else {
             // remain off
-            zone.sonos.state = false;
-            zone.sonos.isCoordinator = false;
-            zone.sonos.isGrouped = false;
-            zone.sonos.groupCoordinator = '';
-            zone.sonos.groupMember = [];
+            zone.local.state = false;
+            zone.local.isCoordinator = false;
+            zone.local.isGrouped = false;
+            zone.local.groupCoordinator = '';
+            zone.local.groupMember = [];
 
             setTimeout(() => zone.sonosService.updateCharacteristic(Characteristic.On, false), zone.timeout.homekit);
         }
     } else {
         // turn off group members if group override is flagged
-        if (zone.sonos.isCoordinator && zone.sonos.isGrouped && config.groupOverride) {
-            zone.sonos.groupMember.forEach((gm) => {
-                const groupZone = platform.zones.find((z) => z.sonos.UUID === gm);
+        if (zone.local.isCoordinator && zone.local.isGrouped && config.groupOverride) {
+            zone.local.groupMember.forEach((gm) => {
+                const groupZone = platform.zones.find((z) => z.local.UUID === gm);
 
                 // set brightness and leave group
                 groupZone.sonosService.updateCharacteristic(Characteristic.On, false);
                 groupZone.sonosService.updateCharacteristic(Characteristic.Brightness,
-                    Math.max(groupZone.sonos.volume, groupZone.device.minVolume));
+                    Math.max(groupZone.local.volume, groupZone.device.minVolume));
 
                 promises.push(groupZone.device.sonos.leaveGroup());
-                groupZone.sonos.state = false;
-                groupZone.sonos.isCoordinator = false;
-                groupZone.sonos.isGrouped = false;
-                groupZone.sonos.groupCoordinator = '';
-                groupZone.sonos.groupMember = [];
+                groupZone.local.state = false;
+                groupZone.local.isCoordinator = false;
+                groupZone.local.isGrouped = false;
+                groupZone.local.groupCoordinator = '';
+                groupZone.local.groupMember = [];
                 groupZone.device.currentTrack = '';
             });
         }
 
         // set minimum HomeKit service value; i.e., brightness = 0% turns off lightbulb, which will turn on at 100%
         zone.sonosService.updateCharacteristic(Characteristic.Brightness,
-                Math.max(zone.sonos.volume, zone.device.minVolume));
+                Math.max(zone.local.volume, zone.device.minVolume));
         zone.sonosService.updateCharacteristic(Characteristic.StatusLowBattery, false);
 
         if (zone.device.htControl && zone.device.tvTrack && !config.tvOverride) {
             setTimeout(() => zone.sonosService.updateCharacteristic(Characteristic.On, true), zone.timeout.homekit);
-            zone.sonos.state = true;
-            zone.sonos.isCoordinator = false;
-            zone.sonos.isGrouped = false;
-            zone.sonos.groupCoordinator = '';
-            zone.sonos.groupMember = [];  
+            zone.local.state = true;
+            zone.local.isCoordinator = false;
+            zone.local.isGrouped = false;
+            zone.local.groupCoordinator = '';
+            zone.local.groupMember = [];  
         } else {
             // remove from coordinator's group tracking
-            const coordinatorZone = platform.zones.find((z) => z.sonos.UUID === zone.sonos.groupCoordinator);
+            const coordinatorZone = platform.zones.find((z) => z.local.UUID === zone.local.groupCoordinator);
 
             if (coordinatorZone) {
-                coordinatorZone.sonos.groupMember = coordinatorZone.sonos.groupMember.filter((z) => z !== zone.sonos.UUID);
+                coordinatorZone.local.groupMember = coordinatorZone.local.groupMember.filter((z) => z !== zone.local.UUID);
 
                 // the coordinator is the only device playing
-                if (coordinatorZone.sonos.groupMember.length == 0) {
-                    coordinatorZone.sonos.isCoordinator = false;
-                    coordinatorZone.sonos.isGrouped = false;
-                    coordinatorZone.sonos.groupCoordinator = '';
+                if (coordinatorZone.local.groupMember.length == 0) {
+                    coordinatorZone.local.isCoordinator = false;
+                    coordinatorZone.local.isGrouped = false;
+                    coordinatorZone.local.groupCoordinator = '';
                 }
             }
 
             promises.push(zone.device.sonos.leaveGroup());
-            zone.sonos.state = false;
-            zone.sonos.isCoordinator = false;
-            zone.sonos.isGrouped = false;
-            zone.sonos.groupCoordinator = '';
-            zone.sonos.groupMember = [];
+            zone.local.state = false;
+            zone.local.isCoordinator = false;
+            zone.local.isGrouped = false;
+            zone.local.groupCoordinator = '';
+            zone.local.groupMember = [];
         }
     }
 
